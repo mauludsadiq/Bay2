@@ -55,6 +55,13 @@ Bay2 removes implicit mutable state, ambient authority, non-verifiable queues, o
 
 ---
 
+## Running the Server
+
+    mkdir -p out/bay2
+    fardrun run --program bay2/src/server.fard --out out/bay2
+
+The server starts on port 19000. Endpoints: POST /object, GET /object/{digest}, GET /objects, GET /replay, POST /meter/credit, POST /meter/charge, POST /pubsub/subscribe, POST /pubsub/publish, GET /summary.
+
 ## Running the Tests
 
     fardrun test --program bay2/tests/test_object.fard
