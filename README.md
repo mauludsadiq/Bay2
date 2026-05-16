@@ -2,8 +2,8 @@
 
 **The operational substrate for AI-operated systems.**
 
-![Tests](https://img.shields.io/badge/tests-106%20passing-brightgreen)
-![Lines](https://img.shields.io/badge/lines-1%2C189-blue)
+![Tests](https://img.shields.io/badge/tests-120%20passing-brightgreen)
+![Lines](https://img.shields.io/badge/lines-1%2C316-blue)
 ![Language](https://img.shields.io/badge/language-Fard-purple)
 
 Written in [Fard](https://github.com/mauludsadiq/FARD).
