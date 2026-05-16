@@ -1,0 +1,118 @@
+import("std/net") as net
+import("std/json") as json
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("std/sqlite") as sqlite
+import("object") as obj
+import("stream") as stream
+import("monotone_index") as idx
+import("replay") as replay
+import("metering") as meter
+import("pubsub") as ps
+
+let port = 19000
+let db_path = "file:out/bay2/bay2.db?cache=shared&mode=rwc"
+let db = sqlite.open(db_path)
+let _ = sqlite.exec(db, "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
+
+let load = fn(key, default) {
+  let rows = sqlite.query(db, str.concat(["SELECT value FROM state WHERE key = '", key, "'"])) in
+  if list.len(rows) > 0 then json.decode(rows[0].value) else default
+}
+
+let save = fn(key, value) {
+  sqlite.exec(db, str.concat(["INSERT OR REPLACE INTO state (key, value) VALUES ('", key, "', '", json.encode(value), "')"]))
+}
+
+let _ = net.serve(port, fn(req) {
+  let object_store = load("object_store", obj.empty_store()) in
+  let mono_idx = load("mono_index", idx.empty_monotone_index()) in
+  let op_log = load("op_log", replay.empty_op_log()) in
+  let meter_state = load("meter", meter.empty_meter()) in
+  let pubsub_state = load("pubsub", ps.empty_pubsub()) in
+
+  if req.path == "/health" && req.method == "GET" then
+    { status: 200, body: json.encode({ ok: true, kind: "bay2_server", object_count: obj.object_count(object_store), op_count: replay.op_count(op_log) }), "content-type": "application/json" }
+
+  else if req.path == "/object" && req.method == "POST" then
+    let body = json.decode(req.body) in
+    let bay2_obj = obj.make_object(body.kind, body.payload, body.author_id, body.timestamp_unix_secs) in
+    let result = obj.store_object(object_store, bay2_obj) in
+    let next_idx = idx.index_object(mono_idx, result.digest, body.kind, body.author_id, body.timestamp_unix_secs, rec.getOr(body, "tags", [])) in
+    let op = replay.make_operation("object_store", { digest: result.digest, kind: body.kind }, body.author_id, op_log.head, body.timestamp_unix_secs) in
+    let op_result = replay.append_operation(op_log, op) in
+    let _ = save("object_store", result.store) in
+    let _ = save("mono_index", next_idx) in
+    let _ = save("op_log", op_result.log) in
+    { status: 200, body: json.encode({ ok: true, digest: result.digest, stored: result.stored }), "content-type": "application/json" }
+
+  else if str.starts_with(req.path, "/object/") && req.method == "GET" then
+    let digest = str.slice(req.path, 8, str.len(req.path)) in
+    let found = obj.get_object(object_store, digest) in
+    if found == null then
+      { status: 404, body: json.encode({ ok: false, reason: "not found" }), "content-type": "application/json" }
+    else
+      { status: 200, body: json.encode({ ok: true, object: found }), "content-type": "application/json" }
+
+  else if req.path == "/objects" && req.method == "GET" then
+    let digests = obj.all_digests(object_store) in
+    { status: 200, body: json.encode({ ok: true, digests: digests, count: list.len(digests) }), "content-type": "application/json" }
+
+  else if req.path == "/index/kind" && req.method == "GET" then
+    let body = json.decode(req.body) in
+    let results = idx.lookup_by_kind(mono_idx, body.kind) in
+    { status: 200, body: json.encode({ ok: true, digests: results, count: list.len(results) }), "content-type": "application/json" }
+
+  else if req.path == "/index/author" && req.method == "GET" then
+    let body = json.decode(req.body) in
+    let results = idx.lookup_by_author(mono_idx, body.author_id) in
+    { status: 200, body: json.encode({ ok: true, digests: results, count: list.len(results) }), "content-type": "application/json" }
+
+  else if req.path == "/index/tag" && req.method == "GET" then
+    let body = json.decode(req.body) in
+    let results = idx.lookup_by_tag(mono_idx, body.tag) in
+    { status: 200, body: json.encode({ ok: true, digests: results, count: list.len(results) }), "content-type": "application/json" }
+
+  else if req.path == "/replay" && req.method == "GET" then
+    let ops = replay.replay_log(op_log) in
+    { status: 200, body: json.encode({ ok: true, ops: ops, count: replay.op_count(op_log) }), "content-type": "application/json" }
+
+  else if req.path == "/meter/credit" && req.method == "POST" then
+    let body = json.decode(req.body) in
+    let next_meter = meter.credit(meter_state, body.agent_id, body.amount) in
+    let _ = save("meter", next_meter) in
+    { status: 200, body: json.encode({ ok: true, balance: meter.get_balance(next_meter, body.agent_id) }), "content-type": "application/json" }
+
+  else if req.path == "/meter/charge" && req.method == "POST" then
+    let body = json.decode(req.body) in
+    let result = meter.charge(meter_state, body.agent_id, body.operation, rec.getOr(body, "params", {})) in
+    if result.ok then
+      let _ = save("meter", result.meter) in
+      { status: 200, body: json.encode({ ok: true, cost: result.cost, balance: meter.get_balance(result.meter, body.agent_id) }), "content-type": "application/json" }
+    else
+      { status: 402, body: json.encode({ ok: false, reason: result.reason, cost: result.cost }), "content-type": "application/json" }
+
+  else if req.path == "/meter/balance" && req.method == "GET" then
+    let body = json.decode(req.body) in
+    { status: 200, body: json.encode({ ok: true, balance: meter.get_balance(meter_state, body.agent_id) }), "content-type": "application/json" }
+
+  else if req.path == "/pubsub/subscribe" && req.method == "POST" then
+    let body = json.decode(req.body) in
+    let sub = ps.make_subscription(body.subscriber_id, body.patterns, rec.getOr(body, "metadata", {})) in
+    let result = ps.subscribe(pubsub_state, sub) in
+    let _ = save("pubsub", result.pubsub) in
+    { status: 200, body: json.encode({ ok: true, subscription_id: result.subscription_id }), "content-type": "application/json" }
+
+  else if req.path == "/pubsub/publish" && req.method == "POST" then
+    let body = json.decode(req.body) in
+    let result = ps.publish_event(pubsub_state, body.resource, body.event) in
+    { status: 200, body: json.encode({ ok: true, delivered_to: result.delivered_to, delivery_count: result.delivery_count }), "content-type": "application/json" }
+
+  else if req.path == "/summary" && req.method == "GET" then
+    let summary = meter.meter_summary(meter_state) in
+    { status: 200, body: json.encode({ ok: true, object_count: obj.object_count(object_store), op_count: replay.op_count(op_log), index_summary: idx.index_summary(mono_idx), meter_summary: summary }), "content-type": "application/json" }
+
+  else
+    { status: 404, body: json.encode({ ok: false, reason: "unknown route" }), "content-type": "application/json" }
+})
