@@ -1,0 +1,76 @@
+import("std/json") as json
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/hash") as hash
+
+// Bay2 Object — the fundamental primitive.
+// Every object in Bay2 is immutable and digest-addressed.
+// The digest is not a pointer to the object — it IS the object's identity.
+// Mutating an object produces a new object with a new digest.
+
+fn canonical_bytes(obj) {
+  json.canonicalize(obj)
+}
+
+fn object_digest(obj) {
+  hash.sha256_text(canonical_bytes(obj))
+}
+
+fn make_object(kind, payload, author_id, timestamp_unix_secs) {
+  {
+    kind: kind,
+    payload: payload,
+    author_id: author_id,
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn object_identity(obj) {
+  object_digest(obj)
+}
+
+fn is_identical(a, b) {
+  object_digest(a) == object_digest(b)
+}
+
+fn empty_store() {
+  { objects: {}, index: [] }
+}
+
+fn store_object(store, obj) {
+  let digest = object_digest(obj) in
+  if rec.has(store.objects, digest) then
+    { store: store, digest: digest, stored: false }
+  else
+    let next_objects = rec.set(store.objects, digest, obj) in
+    let next_index = list.append(store.index, digest) in
+    { store: { objects: next_objects, index: next_index }, digest: digest, stored: true }
+}
+
+fn get_object(store, digest) {
+  rec.getOr(store.objects, digest, null)
+}
+
+fn has_object(store, digest) {
+  rec.has(store.objects, digest)
+}
+
+fn object_count(store) {
+  list.len(store.index)
+}
+
+fn all_digests(store) {
+  store.index
+}
+
+fn object_summary(obj) {
+  {
+    kind: obj.kind,
+    author_id: obj.author_id,
+    timestamp_unix_secs: obj.timestamp_unix_secs,
+    digest: object_digest(obj)
+  }
+}
+
+export { canonical_bytes, object_digest, make_object, object_identity, is_identical, empty_store, store_object, get_object, has_object, object_count, all_digests, object_summary }

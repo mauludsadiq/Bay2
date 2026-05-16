@@ -1,0 +1,77 @@
+import("../src/object") as obj
+import("std/list") as list
+import("std/str") as str
+
+test "object digest is stable" {
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let d1 = obj.object_digest(o) in
+  let d2 = obj.object_digest(o) in
+  d1 == d2 && str.starts_with(d1, "sha256:")
+}
+
+test "different payloads produce different digests" {
+  let o1 = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let o2 = obj.make_object("doc", { text: "world" }, "agent:1", 1000) in
+  obj.object_digest(o1) != obj.object_digest(o2)
+}
+
+test "is identical returns true for same object" {
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  obj.is_identical(o, o)
+}
+
+test "is identical returns false for different objects" {
+  let o1 = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let o2 = obj.make_object("doc", { text: "world" }, "agent:1", 1000) in
+  !obj.is_identical(o1, o2)
+}
+
+test "store starts empty" {
+  let s = obj.empty_store() in
+  obj.object_count(s) == 0
+}
+
+test "store object increments count" {
+  let s = obj.empty_store() in
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let result = obj.store_object(s, o) in
+  obj.object_count(result.store) == 1 && result.stored
+}
+
+test "duplicate store does not increment count" {
+  let s = obj.empty_store() in
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let r1 = obj.store_object(s, o) in
+  let r2 = obj.store_object(r1.store, o) in
+  obj.object_count(r2.store) == 1 && !r2.stored
+}
+
+test "get object returns stored object" {
+  let s = obj.empty_store() in
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let result = obj.store_object(s, o) in
+  let retrieved = obj.get_object(result.store, result.digest) in
+  retrieved != null && retrieved.payload.text == "hello"
+}
+
+test "has object returns true after store" {
+  let s = obj.empty_store() in
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let result = obj.store_object(s, o) in
+  obj.has_object(result.store, result.digest)
+}
+
+test "all digests returns all stored digests" {
+  let s = obj.empty_store() in
+  let o1 = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let o2 = obj.make_object("doc", { text: "world" }, "agent:1", 1000) in
+  let r1 = obj.store_object(s, o1) in
+  let r2 = obj.store_object(r1.store, o2) in
+  list.len(obj.all_digests(r2.store)) == 2
+}
+
+test "object summary extracts key fields" {
+  let o = obj.make_object("doc", { text: "hello" }, "agent:1", 1000) in
+  let summary = obj.object_summary(o) in
+  summary.kind == "doc" && summary.author_id == "agent:1"
+}
