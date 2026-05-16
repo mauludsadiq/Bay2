@@ -1,0 +1,124 @@
+import("../src/anka_bridge") as bridge
+import("../src/object") as obj
+import("../src/stream") as stream
+import("../src/replay") as replay
+import("../src/metering") as meter
+import("../src/pubsub") as ps
+import("../src/monotone_index") as idx
+import("std/list") as list
+import("std/str") as str
+
+let sample_envelope = {
+  claim: {
+    claim_space: "research.result.claims",
+    subject: "climate-2026",
+    predicate: "reported_finding",
+    object: "3.2C",
+    evidence_refs: ["ipcc_ar7:draft"],
+    issuer_node_id: "ed25519:abc123",
+    timestamp_unix_secs: 1775710900
+  },
+  digest_hex: "sha256:939c3c7e521ff7a5acc63c0df79bb392b4584476a27a7488d38744ccc18c66d0",
+  issuer_signature_hex: "sig:abc"
+}
+
+test "claim converts to Bay2 object" {
+  let bay2_obj = bridge.claim_to_object(sample_envelope) in
+  bay2_obj.kind == "anka.claim" &&
+  bay2_obj.author_id == "ed25519:abc123" &&
+  bay2_obj.timestamp_unix_secs == 1775710900
+}
+
+test "claim digest preserved in payload" {
+  let bay2_obj = bridge.claim_to_object(sample_envelope) in
+  bay2_obj.payload.digest_hex == sample_envelope.digest_hex
+}
+
+test "claim space maps to pubsub topic" {
+  let topic = bridge.claim_space_to_topic("research.result.claims") in
+  topic == "anka.claim.research.result.claims"
+}
+
+test "claim space maps to policy namespace" {
+  let ns = bridge.claim_space_to_namespace("research.result.claims") in
+  ns == "anka.ns.research.result.claims"
+}
+
+test "witness converts to replay operation" {
+  let witness = {
+    digest_hex: sample_envelope.digest_hex,
+    witness_node_id: "ed25519:bob456",
+    validation_type: "structural",
+    timestamp_unix_secs: 1775710910
+  } in
+  let op = bridge.witness_to_operation(witness, replay.GENESIS_OP_DIGEST) in
+  op.kind == "anka.witnessed" && op.author_id == "ed25519:bob456"
+}
+
+test "challenge converts to replay operation" {
+  let challenge = {
+    target_digest_hex: sample_envelope.digest_hex,
+    challenger_node_id: "ed25519:carol789",
+    kind: "methodological",
+    timestamp_unix_secs: 1775710920
+  } in
+  let op = bridge.challenge_to_operation(challenge, replay.GENESIS_OP_DIGEST) in
+  op.kind == "anka.challenged" && op.author_id == "ed25519:carol789"
+}
+
+test "audit trail entry maps to replay operation" {
+  let trail_entry = {
+    digest_hex: sample_envelope.digest_hex,
+    event_kind: "published",
+    event_data: { claim_space: "research.result.claims", issuer: "ed25519:abc123" },
+    timestamp_unix_secs: 1775710900
+  } in
+  let op = bridge.trail_entry_to_operation(trail_entry, "ed25519:abc123", replay.GENESIS_OP_DIGEST) in
+  op.kind == "anka.published"
+}
+
+test "claim indexes into Bay2 monotone index" {
+  let empty = idx.empty_monotone_index() in
+  let indexed = bridge.claim_to_index_entry(empty, sample_envelope) in
+  let by_kind = idx.lookup_by_kind(indexed, "anka.claim") in
+  let by_author = idx.lookup_by_author(indexed, "ed25519:abc123") in
+  list.len(by_kind) == 1 && list.len(by_author) == 1
+}
+
+test "metering charges publish" {
+  let m = meter.credit(meter.empty_meter(), "ed25519:abc123", 10000) in
+  let result = bridge.charge_publish(m, "ed25519:abc123", 1) in
+  result.ok && meter.get_balance(result.meter, "ed25519:abc123") < 10000
+}
+
+test "metering rewards witness" {
+  let m = meter.empty_meter() in
+  let result = bridge.reward_witness(m, "ed25519:bob456", 10) in
+  result.ok && meter.get_balance(result.meter, "ed25519:bob456") == 10
+}
+
+test "subscribe to claim space creates pubsub subscription" {
+  let p = ps.empty_pubsub() in
+  let result = bridge.subscribe_to_claim_space(p, "agent:1", "research.result.claims") in
+  ps.subscription_count(result.pubsub) == 1
+}
+
+test "deliver claim notifies matching subscribers" {
+  let p = ps.empty_pubsub() in
+  let r = bridge.subscribe_to_claim_space(p, "agent:1", "research.result.claims") in
+  let delivery = bridge.deliver_claim(r.pubsub, sample_envelope) in
+  delivery.delivery_count == 1
+}
+
+test "wildcard subscriber receives all claim spaces" {
+  let p = ps.empty_pubsub() in
+  let r = bridge.subscribe_to_all_claims(p, "agent:1") in
+  let d1 = bridge.deliver_claim(r.pubsub, sample_envelope) in
+  d1.delivery_count == 1
+}
+
+test "store claim object wraps in Bay2 store" {
+  let store = obj.empty_store() in
+  let result = bridge.store_claim_object(store, sample_envelope) in
+  result.stored && obj.object_count(result.store) == 1
+}

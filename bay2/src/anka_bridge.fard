@@ -1,0 +1,127 @@
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("object") as obj
+import("stream") as stream
+import("pubsub") as ps
+import("replay") as replay
+import("metering") as meter
+import("monotone_index") as idx
+
+// ANKA-Bay2 Bridge
+// Thin translation layer. No business logic.
+// All epistemic semantics stay in ANKA.
+// All operational semantics stay in Bay2.
+
+fn claim_to_object(envelope) {
+  obj.make_object(
+    "anka.claim",
+    envelope,
+    envelope.claim.issuer_node_id,
+    envelope.claim.timestamp_unix_secs
+  )
+}
+
+fn claim_space_to_topic(claim_space_name) {
+  str.concat(["anka.claim.", claim_space_name])
+}
+
+fn claim_space_to_namespace(claim_space_name) {
+  str.concat(["anka.ns.", claim_space_name])
+}
+
+fn gossip_to_stream_entry(gossip_wire, node_id, parent_digest) {
+  stream.make_entry(
+    str.concat(["anka.gossip.", node_id]),
+    "anka.gossip",
+    gossip_wire,
+    gossip_wire.issuer_node_id,
+    parent_digest,
+    gossip_wire.timestamp_unix_secs
+  )
+}
+
+fn witness_to_operation(witness, parent_op_digest) {
+  replay.make_operation(
+    "anka.witnessed",
+    witness,
+    witness.witness_node_id,
+    parent_op_digest,
+    witness.timestamp_unix_secs
+  )
+}
+
+fn challenge_to_operation(challenge, parent_op_digest) {
+  replay.make_operation(
+    "anka.challenged",
+    challenge,
+    challenge.challenger_node_id,
+    parent_op_digest,
+    challenge.timestamp_unix_secs
+  )
+}
+
+fn trail_entry_to_operation(trail_entry, author_id, parent_op_digest) {
+  replay.make_operation(
+    str.concat(["anka.", trail_entry.event_kind]),
+    trail_entry.event_data,
+    author_id,
+    parent_op_digest,
+    trail_entry.timestamp_unix_secs
+  )
+}
+
+fn claim_to_index_entry(idx_store, envelope) {
+  let digest = envelope.digest_hex in
+  let claim = envelope.claim in
+  idx.index_object(
+    idx_store,
+    digest,
+    "anka.claim",
+    claim.issuer_node_id,
+    claim.timestamp_unix_secs,
+    [claim.claim_space]
+  )
+}
+
+fn charge_publish(meter_state, issuer_node_id, evidence_ref_count) {
+  meter.charge(meter_state, issuer_node_id, "object_store", { payload_size: evidence_ref_count * 10 })
+}
+
+fn charge_witness(meter_state, witness_node_id) {
+  meter.charge(meter_state, witness_node_id, "stream_append", { payload_size: 0 })
+}
+
+fn reward_witness(meter_state, witness_node_id, reward_amount) {
+  { ok: true, meter: meter.credit(meter_state, witness_node_id, reward_amount) }
+}
+
+fn subscribe_to_claim_space(pubsub_state, subscriber_id, claim_space_name) {
+  let topic = claim_space_to_topic(claim_space_name) in
+  let sub = ps.make_subscription(subscriber_id, [topic], { claim_space: claim_space_name }) in
+  ps.subscribe(pubsub_state, sub)
+}
+
+fn subscribe_to_all_claims(pubsub_state, subscriber_id) {
+  let sub = ps.make_subscription(subscriber_id, ["anka.claim.*"], {}) in
+  ps.subscribe(pubsub_state, sub)
+}
+
+fn deliver_claim(pubsub_state, envelope) {
+  let topic = claim_space_to_topic(envelope.claim.claim_space) in
+  ps.publish_event(pubsub_state, topic, { kind: "anka.claim", digest_hex: envelope.digest_hex })
+}
+
+fn store_claim_object(object_store, envelope) {
+  let bay2_obj = claim_to_object(envelope) in
+  obj.store_object(object_store, bay2_obj)
+}
+
+export {
+  claim_to_object, claim_space_to_topic, claim_space_to_namespace,
+  gossip_to_stream_entry, witness_to_operation, challenge_to_operation,
+  trail_entry_to_operation, claim_to_index_entry,
+  charge_publish, charge_witness, reward_witness,
+  subscribe_to_claim_space, subscribe_to_all_claims, deliver_claim,
+  store_claim_object
+}
