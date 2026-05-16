@@ -1,0 +1,79 @@
+import("../src/capability") as cap
+import("std/list") as list
+
+test "capability digest is stable" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["read"], 0, "nonce1") in
+  cap.capability_digest(c) == cap.capability_digest(c)
+}
+
+test "different holders produce different digests" {
+  let c1 = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["read"], 0, "nonce1") in
+  let c2 = cap.make_capability("issuer:1", "holder:2", "stream:s1", ["read"], 0, "nonce1") in
+  cap.capability_digest(c1) != cap.capability_digest(c2)
+}
+
+test "has right returns true for matching right" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["read", "append"], 0, "n1") in
+  cap.has_right(c, "read") && cap.has_right(c, "append")
+}
+
+test "has right returns false for missing right" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["read"], 0, "n1") in
+  !cap.has_right(c, "write")
+}
+
+test "admin right grants all rights" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["admin"], 0, "n1") in
+  cap.has_right(c, "read") && cap.has_right(c, "write") && cap.has_right(c, "append")
+}
+
+test "resource wildcard matches prefix" {
+  cap.resource_matches("stream:*", "stream:s1") &&
+  cap.resource_matches("stream:*", "stream:abc") &&
+  !cap.resource_matches("stream:*", "object:o1")
+}
+
+test "resource exact match works" {
+  cap.resource_matches("stream:s1", "stream:s1") &&
+  !cap.resource_matches("stream:s1", "stream:s2")
+}
+
+test "is valid for checks all conditions" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:*", ["read"], 0, "n1") in
+  cap.is_valid_for(c, "holder:1", "stream:s1", "read", 1000) &&
+  !cap.is_valid_for(c, "holder:2", "stream:s1", "read", 1000) &&
+  !cap.is_valid_for(c, "holder:1", "object:o1", "read", 1000)
+}
+
+test "expired capability is invalid" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:*", ["read"], 500, "n1") in
+  !cap.is_valid_for(c, "holder:1", "stream:s1", "read", 1000)
+}
+
+test "zero expiry means never expires" {
+  let c = cap.make_capability("issuer:1", "holder:1", "stream:*", ["read"], 0, "n1") in
+  cap.is_valid_for(c, "holder:1", "stream:s1", "read", 9999999)
+}
+
+test "attenuate narrows rights" {
+  let parent = cap.make_capability("issuer:1", "holder:1", "stream:*", ["read","write"], 0, "n1") in
+  let result = cap.attenuate(parent, "holder:2", "stream:s1", ["read"], 0, "n2") in
+  result.ok && cap.has_right(result.capability, "read") && !cap.has_right(result.capability, "write")
+}
+
+test "attenuate rejects broader rights" {
+  let parent = cap.make_capability("issuer:1", "holder:1", "stream:s1", ["read"], 0, "n1") in
+  let result = cap.attenuate(parent, "holder:2", "stream:s1", ["read","write"], 0, "n2") in
+  !result.ok
+}
+
+test "revoke marks capability as revoked" {
+  let store = cap.empty_capability_store() in
+  let revoked = cap.revoke_capability(store, "sha256:abc") in
+  cap.is_revoked(revoked, "sha256:abc") && !cap.is_revoked(store, "sha256:abc")
+}
+
+test "capability store tracks count" {
+  let store = cap.empty_capability_store() in
+  cap.capability_count(store) == 0
+}
