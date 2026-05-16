@@ -1,0 +1,74 @@
+import("../src/monotone_index") as idx
+import("std/list") as list
+
+test "index starts empty" {
+  let i = idx.empty_monotone_index() in
+  let s = idx.index_summary(i) in
+  s.entry_count == 0 && s.kind_count == 0
+}
+
+test "index object adds to kind index" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let results = idx.lookup_by_kind(i, "doc") in
+  list.len(results) == 1 && list.any(results, fn(d) { d == "sha256:abc" })
+}
+
+test "index object adds to author index" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let results = idx.lookup_by_author(i, "agent:1") in
+  list.len(results) == 1
+}
+
+test "index object adds to time index" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let results = idx.lookup_by_time(i, 1000) in
+  list.len(results) == 1
+}
+
+test "index object adds to tag index" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, ["climate", "science"]) in
+  let r1 = idx.lookup_by_tag(i, "climate") in
+  let r2 = idx.lookup_by_tag(i, "science") in
+  list.len(r1) == 1 && list.len(r2) == 1
+}
+
+test "duplicate indexing deduplicates" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let i2 = idx.index_object(i, "sha256:abc", "doc", "agent:1", 1000, []) in
+  list.len(idx.lookup_by_kind(i2, "doc")) == 1
+}
+
+test "time range query spans multiple buckets" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let i2 = idx.index_object(i, "sha256:def", "doc", "agent:1", 1000 + 86400, []) in
+  let results = idx.lookup_by_time_range(i2, 1000, 1000 + 86400) in
+  list.len(results) == 2
+}
+
+test "time range excludes out of range" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let i2 = idx.index_object(i, "sha256:def", "doc", "agent:1", 1000 + 86400 * 5, []) in
+  let results = idx.lookup_by_time_range(i2, 1000, 1000 + 86400) in
+  list.len(results) == 1
+}
+
+test "merge indexes combines without duplicates" {
+  let i1 = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let i2 = idx.index_object(idx.empty_monotone_index(), "sha256:def", "doc", "agent:2", 1000, []) in
+  let merged = idx.merge_indexes(i1, i2) in
+  list.len(idx.lookup_by_kind(merged, "doc")) == 2
+}
+
+test "merge indexes deduplicates shared entries" {
+  let i1 = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let i2 = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, []) in
+  let merged = idx.merge_indexes(i1, i2) in
+  list.len(idx.lookup_by_kind(merged, "doc")) == 1
+}
+
+test "index summary returns correct counts" {
+  let i = idx.index_object(idx.empty_monotone_index(), "sha256:abc", "doc", "agent:1", 1000, ["tag1"]) in
+  let i2 = idx.index_object(i, "sha256:def", "msg", "agent:2", 1000, ["tag2"]) in
+  let s = idx.index_summary(i2) in
+  s.kind_count == 2 && s.author_count == 2 && s.tag_count == 2
+}

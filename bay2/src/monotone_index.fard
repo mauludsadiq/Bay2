@@ -1,0 +1,118 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 Monotone Index — append-only indexes over object and stream namespaces.
+// Monotone means: entries are only added, never removed or overwritten.
+// This gives: stable reads, no cache invalidation, mergeable without conflict.
+// Indexes are identified by their key space and support prefix queries.
+//
+// Index kinds:
+//   kind_index:     kind -> [digest]
+//   author_index:   author_id -> [digest]
+//   time_index:     time_bucket -> [digest]
+//   tag_index:      tag -> [digest]
+//   stream_index:   stream_id -> [entry_digest]
+
+fn empty_monotone_index() {
+  {
+    kind_index: {},
+    author_index: {},
+    time_index: {},
+    tag_index: {},
+    entry_count: 0
+  }
+}
+
+fn time_bucket(timestamp_unix_secs) {
+  timestamp_unix_secs / 86400
+}
+
+fn add_to_bucket(index_map, key, digest) {
+  let existing = rec.getOr(index_map, key, []) in
+  if list.any(existing, fn(d) { d == digest }) then index_map
+  else rec.set(index_map, key, list.append(existing, digest))
+}
+
+fn index_object(idx, digest, kind, author_id, timestamp_unix_secs, tags) {
+  let bucket = str.from(time_bucket(timestamp_unix_secs)) in
+  let next_kind = add_to_bucket(idx.kind_index, kind, digest) in
+  let next_author = add_to_bucket(idx.author_index, author_id, digest) in
+  let next_time = add_to_bucket(idx.time_index, bucket, digest) in
+  let next_tags = list.fold(tags, idx.tag_index, fn(acc, tag) {
+    add_to_bucket(acc, tag, digest)
+  }) in
+  {
+    kind_index: next_kind,
+    author_index: next_author,
+    time_index: next_time,
+    tag_index: next_tags,
+    entry_count: idx.entry_count + 1
+  }
+}
+
+fn lookup_by_kind(idx, kind) {
+  rec.getOr(idx.kind_index, kind, [])
+}
+
+fn lookup_by_author(idx, author_id) {
+  rec.getOr(idx.author_index, author_id, [])
+}
+
+fn lookup_by_time(idx, timestamp_unix_secs) {
+  let bucket = str.from(time_bucket(timestamp_unix_secs)) in
+  rec.getOr(idx.time_index, bucket, [])
+}
+
+fn lookup_by_tag(idx, tag) {
+  rec.getOr(idx.tag_index, tag, [])
+}
+
+fn lookup_by_time_range(idx, from_ts, to_ts) {
+  let from_bucket = time_bucket(from_ts) in
+  let to_bucket = time_bucket(to_ts) in
+  let bucket_count = to_bucket - from_bucket + 1 in
+  let buckets = list.map(list.range(0, bucket_count), fn(i) {
+    str.from(from_bucket + i)
+  }) in
+  let all_digests = list.fold(buckets, [], fn(acc, bucket) {
+    let digests = rec.getOr(idx.time_index, bucket, []) in
+    list.concat([acc, digests])
+  }) in
+  list.dedupe(all_digests)
+}
+
+fn merge_indexes(a, b) {
+  let merge_map = fn(map_a, map_b) {
+    list.fold(rec.keys(map_b), map_a, fn(acc, key) {
+      let b_vals = rec.get(map_b, key) in
+      let a_vals = rec.getOr(acc, key, []) in
+      let new_vals = list.filter(b_vals, fn(v) {
+        !list.any(a_vals, fn(av) { av == v })
+      }) in
+      if list.len(new_vals) == 0 then acc
+      else rec.set(acc, key, list.concat([a_vals, new_vals]))
+    })
+  } in
+  {
+    kind_index: merge_map(a.kind_index, b.kind_index),
+    author_index: merge_map(a.author_index, b.author_index),
+    time_index: merge_map(a.time_index, b.time_index),
+    tag_index: merge_map(a.tag_index, b.tag_index),
+    entry_count: a.entry_count + b.entry_count
+  }
+}
+
+fn index_summary(idx) {
+  {
+    kind_count: list.len(rec.keys(idx.kind_index)),
+    author_count: list.len(rec.keys(idx.author_index)),
+    time_bucket_count: list.len(rec.keys(idx.time_index)),
+    tag_count: list.len(rec.keys(idx.tag_index)),
+    entry_count: idx.entry_count
+  }
+}
+
+export { empty_monotone_index, time_bucket, index_object, lookup_by_kind, lookup_by_author, lookup_by_time, lookup_by_tag, lookup_by_time_range, merge_indexes, index_summary }
