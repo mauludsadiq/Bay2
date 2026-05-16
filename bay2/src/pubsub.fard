@@ -1,0 +1,110 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 PubSub — subscription management over object and stream namespaces.
+// Subscriptions are declared, not implicit.
+// A subscriber declares what resource patterns it wants.
+// The system delivers only matching events.
+// Bandwidth is proportional to subscription scope, not total activity.
+//
+// Subscription patterns:
+//   "stream:s1"       — exact stream
+//   "stream:*"        — all streams
+//   "object:kind:doc" — all objects of kind "doc"
+//   "object:*"        — all objects
+//   "*"               — everything (wildcard)
+
+fn make_subscription(subscriber_id, patterns, metadata) {
+  {
+    subscriber_id: subscriber_id,
+    patterns: patterns,
+    metadata: metadata
+  }
+}
+
+fn subscription_id(sub) {
+  hash.sha256_text(json.canonicalize({
+    subscriber_id: sub.subscriber_id,
+    patterns: sub.patterns
+  }))
+}
+
+fn pattern_matches(pattern, resource) {
+  if pattern == "*" then true
+  else if str.ends_with(pattern, "*") then
+    let prefix = str.slice(pattern, 0, str.len(pattern) - 1) in
+    str.starts_with(resource, prefix)
+  else
+    pattern == resource
+}
+
+fn subscription_matches(sub, resource) {
+  list.any(sub.patterns, fn(p) { pattern_matches(p, resource) })
+}
+
+fn empty_pubsub() {
+  { subscriptions: {}, subscriber_index: [] }
+}
+
+fn subscribe(pubsub, sub) {
+  let sid = subscription_id(sub) in
+  let next_subs = rec.set(pubsub.subscriptions, sid, sub) in
+  let next_index = if list.any(pubsub.subscriber_index, fn(s) { s == sub.subscriber_id }) then
+    pubsub.subscriber_index
+  else
+    list.append(pubsub.subscriber_index, sub.subscriber_id)
+  in
+  { pubsub: { subscriptions: next_subs, subscriber_index: next_index }, subscription_id: sid }
+}
+
+fn unsubscribe(pubsub, subscription_id) {
+  { ...pubsub, subscriptions: rec.remove(pubsub.subscriptions, subscription_id) }
+}
+
+fn subscribers_for(pubsub, resource) {
+  let all_sids = rec.keys(pubsub.subscriptions) in
+  let matching = list.filter(all_sids, fn(sid) {
+    let sub = rec.get(pubsub.subscriptions, sid) in
+    subscription_matches(sub, resource)
+  }) in
+  list.map(matching, fn(sid) {
+    rec.get(pubsub.subscriptions, sid).subscriber_id
+  })
+}
+
+fn subscriptions_for(pubsub, subscriber_id) {
+  let all_sids = rec.keys(pubsub.subscriptions) in
+  list.filter(all_sids, fn(sid) {
+    rec.get(pubsub.subscriptions, sid).subscriber_id == subscriber_id
+  })
+}
+
+fn subscription_count(pubsub) {
+  list.len(rec.keys(pubsub.subscriptions))
+}
+
+fn subscriber_count(pubsub) {
+  list.len(pubsub.subscriber_index)
+}
+
+fn publish_event(pubsub, resource, event) {
+  let matching_subscribers = subscribers_for(pubsub, resource) in
+  {
+    resource: resource,
+    event: event,
+    delivered_to: matching_subscribers,
+    delivery_count: list.len(matching_subscribers)
+  }
+}
+
+fn bandwidth_report(pubsub, resources) {
+  list.map(resources, fn(resource) {
+    let count = list.len(subscribers_for(pubsub, resource)) in
+    { resource: resource, subscriber_count: count }
+  })
+}
+
+export { make_subscription, subscription_id, pattern_matches, subscription_matches, empty_pubsub, subscribe, unsubscribe, subscribers_for, subscriptions_for, subscription_count, subscriber_count, publish_event, bandwidth_report }

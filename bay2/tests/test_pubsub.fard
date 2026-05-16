@@ -1,0 +1,94 @@
+import("../src/pubsub") as ps
+import("std/list") as list
+
+test "empty pubsub has no subscriptions" {
+  let p = ps.empty_pubsub() in
+  ps.subscription_count(p) == 0 && ps.subscriber_count(p) == 0
+}
+
+test "exact pattern matches resource" {
+  ps.pattern_matches("stream:s1", "stream:s1") &&
+  !ps.pattern_matches("stream:s1", "stream:s2")
+}
+
+test "wildcard pattern matches all" {
+  ps.pattern_matches("*", "stream:s1") &&
+  ps.pattern_matches("*", "object:o1")
+}
+
+test "prefix wildcard matches prefix" {
+  ps.pattern_matches("stream:*", "stream:s1") &&
+  ps.pattern_matches("stream:*", "stream:abc") &&
+  !ps.pattern_matches("stream:*", "object:o1")
+}
+
+test "subscription matches any of its patterns" {
+  let sub = ps.make_subscription("agent:1", ["stream:s1", "object:*"], {}) in
+  ps.subscription_matches(sub, "stream:s1") &&
+  ps.subscription_matches(sub, "object:doc") &&
+  !ps.subscription_matches(sub, "stream:s2")
+}
+
+test "subscribe adds subscription" {
+  let p = ps.empty_pubsub() in
+  let sub = ps.make_subscription("agent:1", ["stream:*"], {}) in
+  let result = ps.subscribe(p, sub) in
+  ps.subscription_count(result.pubsub) == 1
+}
+
+test "subscribers for returns matching subscribers" {
+  let p = ps.empty_pubsub() in
+  let s1 = ps.make_subscription("agent:1", ["stream:*"], {}) in
+  let s2 = ps.make_subscription("agent:2", ["object:*"], {}) in
+  let r1 = ps.subscribe(p, s1) in
+  let r2 = ps.subscribe(r1.pubsub, s2) in
+  let subs = ps.subscribers_for(r2.pubsub, "stream:s1") in
+  list.len(subs) == 1 && list.any(subs, fn(sub_id) { sub_id == "agent:1" })
+}
+
+test "wildcard subscriber receives all events" {
+  let p = ps.empty_pubsub() in
+  let sub = ps.make_subscription("agent:1", ["*"], {}) in
+  let r = ps.subscribe(p, sub) in
+  let stream_subs = ps.subscribers_for(r.pubsub, "stream:s1") in
+  let object_subs = ps.subscribers_for(r.pubsub, "object:o1") in
+  list.len(stream_subs) == 1 && list.len(object_subs) == 1
+}
+
+test "narrow subscriber receives only matching events" {
+  let p = ps.empty_pubsub() in
+  let sub = ps.make_subscription("agent:1", ["stream:s1"], {}) in
+  let r = ps.subscribe(p, sub) in
+  let matched = ps.subscribers_for(r.pubsub, "stream:s1") in
+  let not_matched = ps.subscribers_for(r.pubsub, "stream:s2") in
+  list.len(matched) == 1 && list.len(not_matched) == 0
+}
+
+test "unsubscribe removes subscription" {
+  let p = ps.empty_pubsub() in
+  let sub = ps.make_subscription("agent:1", ["stream:*"], {}) in
+  let r = ps.subscribe(p, sub) in
+  let removed = ps.unsubscribe(r.pubsub, r.subscription_id) in
+  ps.subscription_count(removed) == 0
+}
+
+test "publish event returns delivery count" {
+  let p = ps.empty_pubsub() in
+  let s1 = ps.make_subscription("agent:1", ["stream:*"], {}) in
+  let s2 = ps.make_subscription("agent:2", ["stream:*"], {}) in
+  let s3 = ps.make_subscription("agent:3", ["object:*"], {}) in
+  let r1 = ps.subscribe(p, s1) in
+  let r2 = ps.subscribe(r1.pubsub, s2) in
+  let r3 = ps.subscribe(r2.pubsub, s3) in
+  let result = ps.publish_event(r3.pubsub, "stream:s1", { kind: "append" }) in
+  result.delivery_count == 2
+}
+
+test "multiple subscriptions for same subscriber" {
+  let p = ps.empty_pubsub() in
+  let s1 = ps.make_subscription("agent:1", ["stream:s1"], {}) in
+  let s2 = ps.make_subscription("agent:1", ["stream:s2"], {}) in
+  let r1 = ps.subscribe(p, s1) in
+  let r2 = ps.subscribe(r1.pubsub, s2) in
+  ps.subscription_count(r2.pubsub) == 2
+}
