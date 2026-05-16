@@ -1,0 +1,87 @@
+import("../src/replication") as rep
+import("std/list") as list
+import("std/str") as str
+
+test "declaration digest is stable" {
+  let d = rep.make_declaration("holder:1", ["sha256:abc"], "replicate", 1000) in
+  rep.declaration_digest(d) == rep.declaration_digest(d)
+}
+
+test "different holders produce different digests" {
+  let d1 = rep.make_declaration("holder:1", ["sha256:abc"], "replicate", 1000) in
+  let d2 = rep.make_declaration("holder:2", ["sha256:abc"], "replicate", 1000) in
+  rep.declaration_digest(d1) != rep.declaration_digest(d2)
+}
+
+test "receipt digest is stable" {
+  let r = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  rep.receipt_digest(r) == rep.receipt_digest(r)
+}
+
+test "replication store starts empty" {
+  let s = rep.empty_replication_store() in
+  rep.receipt_count(s) == 0 && rep.declaration_count(s) == 0
+}
+
+test "store receipt increments count" {
+  let s = rep.empty_replication_store() in
+  let r = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let env = { receipt: r, digest_hex: rep.receipt_digest(r), signature_hex: "sig" } in
+  let s2 = rep.store_receipt(s, env) in
+  rep.receipt_count(s2) == 1
+}
+
+test "holders for returns receipt holders" {
+  let s = rep.empty_replication_store() in
+  let r1 = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let r2 = rep.make_receipt("holder:2", "sha256:abc", 1000) in
+  let e1 = { receipt: r1, digest_hex: rep.receipt_digest(r1), signature_hex: "sig1" } in
+  let e2 = { receipt: r2, digest_hex: rep.receipt_digest(r2), signature_hex: "sig2" } in
+  let s2 = rep.store_receipt(rep.store_receipt(s, e1), e2) in
+  let holders = rep.holders_for(s2, "sha256:abc") in
+  list.len(holders) == 2
+}
+
+test "is durable returns true when enough holders" {
+  let s = rep.empty_replication_store() in
+  let r1 = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let r2 = rep.make_receipt("holder:2", "sha256:abc", 1000) in
+  let r3 = rep.make_receipt("holder:3", "sha256:abc", 1000) in
+  let e1 = { receipt: r1, digest_hex: rep.receipt_digest(r1), signature_hex: "s1" } in
+  let e2 = { receipt: r2, digest_hex: rep.receipt_digest(r2), signature_hex: "s2" } in
+  let e3 = { receipt: r3, digest_hex: rep.receipt_digest(r3), signature_hex: "s3" } in
+  let s2 = rep.store_receipt(rep.store_receipt(rep.store_receipt(s, e1), e2), e3) in
+  rep.is_durable(s2, "sha256:abc", 3)
+}
+
+test "is durable returns false when insufficient holders" {
+  let s = rep.empty_replication_store() in
+  let r = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let e = { receipt: r, digest_hex: rep.receipt_digest(r), signature_hex: "sig" } in
+  let s2 = rep.store_receipt(s, e) in
+  !rep.is_durable(s2, "sha256:abc", 3)
+}
+
+test "durability report shows per object status" {
+  let s = rep.empty_replication_store() in
+  let r1 = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let r2 = rep.make_receipt("holder:2", "sha256:abc", 1000) in
+  let e1 = { receipt: r1, digest_hex: rep.receipt_digest(r1), signature_hex: "s1" } in
+  let e2 = { receipt: r2, digest_hex: rep.receipt_digest(r2), signature_hex: "s2" } in
+  let s2 = rep.store_receipt(rep.store_receipt(s, e1), e2) in
+  let report = rep.durability_report(s2, ["sha256:abc", "sha256:def"], 2) in
+  let abc = list.head(report) in
+  let def = list.get(report, 1) in
+  abc.durable && !def.durable
+}
+
+test "holders for different object do not overlap" {
+  let s = rep.empty_replication_store() in
+  let r1 = rep.make_receipt("holder:1", "sha256:abc", 1000) in
+  let r2 = rep.make_receipt("holder:2", "sha256:def", 1000) in
+  let e1 = { receipt: r1, digest_hex: rep.receipt_digest(r1), signature_hex: "s1" } in
+  let e2 = { receipt: r2, digest_hex: rep.receipt_digest(r2), signature_hex: "s2" } in
+  let s2 = rep.store_receipt(rep.store_receipt(s, e1), e2) in
+  list.len(rep.holders_for(s2, "sha256:abc")) == 1 &&
+  list.len(rep.holders_for(s2, "sha256:def")) == 1
+}

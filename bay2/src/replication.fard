@@ -1,0 +1,132 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+import("std/crypto") as crypto
+
+// Bay2 Replication — signed receipts and durability guarantees.
+// A replication declaration announces intent to hold a set of objects.
+// A replication receipt proves an object was received and stored.
+// Durability is queryable: given a set of receipts, how many holders?
+// Slashing is possible: a holder that cannot produce an object loses stake.
+
+fn make_declaration(holder_id, object_digests, policy, timestamp_unix_secs) {
+  {
+    holder_id: holder_id,
+    object_digests: object_digests,
+    policy: policy,
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn declaration_digest(decl) {
+  hash.sha256_text(json.canonicalize({
+    holder_id: decl.holder_id,
+    object_digests: decl.object_digests,
+    policy: decl.policy,
+    timestamp_unix_secs: decl.timestamp_unix_secs
+  }))
+}
+
+fn sign_declaration(decl, private_key_hex) {
+  let digest = declaration_digest(decl) in
+  let raw = str.slice(digest, 7, str.len(digest)) in
+  let sig = crypto.ed25519_sign(private_key_hex, raw) in
+  { declaration: decl, digest_hex: digest, signature_hex: sig }
+}
+
+fn verify_declaration(envelope, public_key_hex) {
+  let digest_ok = declaration_digest(envelope.declaration) == envelope.digest_hex in
+  let sig_ok = if digest_ok then
+    let raw = str.slice(envelope.digest_hex, 7, str.len(envelope.digest_hex)) in
+    crypto.ed25519_verify(public_key_hex, raw, envelope.signature_hex)
+  else false in
+  { valid: digest_ok && sig_ok }
+}
+
+fn make_receipt(holder_id, object_digest, received_at_unix_secs) {
+  {
+    holder_id: holder_id,
+    object_digest: object_digest,
+    received_at_unix_secs: received_at_unix_secs
+  }
+}
+
+fn receipt_digest(receipt) {
+  hash.sha256_text(json.canonicalize({
+    holder_id: receipt.holder_id,
+    object_digest: receipt.object_digest,
+    received_at_unix_secs: receipt.received_at_unix_secs
+  }))
+}
+
+fn sign_receipt(receipt, private_key_hex) {
+  let digest = receipt_digest(receipt) in
+  let raw = str.slice(digest, 7, str.len(digest)) in
+  let sig = crypto.ed25519_sign(private_key_hex, raw) in
+  { receipt: receipt, digest_hex: digest, signature_hex: sig }
+}
+
+fn verify_receipt(envelope, public_key_hex) {
+  let digest_ok = receipt_digest(envelope.receipt) == envelope.digest_hex in
+  let sig_ok = if digest_ok then
+    let raw = str.slice(envelope.digest_hex, 7, str.len(envelope.digest_hex)) in
+    crypto.ed25519_verify(public_key_hex, raw, envelope.signature_hex)
+  else false in
+  { valid: digest_ok && sig_ok }
+}
+
+fn empty_replication_store() {
+  { declarations: {}, receipts: {}, receipt_index: [] }
+}
+
+fn store_declaration(store, envelope) {
+  { ...store, declarations: rec.set(store.declarations, envelope.digest_hex, envelope) }
+}
+
+fn store_receipt(store, envelope) {
+  let key = str.concat([envelope.receipt.holder_id, ":", envelope.receipt.object_digest]) in
+  let next_receipts = rec.set(store.receipts, key, envelope) in
+  let next_index = if list.any(store.receipt_index, fn(k) { k == key }) then
+    store.receipt_index
+  else
+    list.append(store.receipt_index, key)
+  in
+  { ...store, receipts: next_receipts, receipt_index: next_index }
+}
+
+fn holders_for(store, object_digest) {
+  let matching = list.filter(store.receipt_index, fn(k) {
+    let parts = str.split(k, ":") in
+    list.len(parts) >= 2 && str.ends_with(k, str.concat([":", object_digest]))
+  }) in
+  list.map(matching, fn(k) {
+    rec.get(store.receipts, k).receipt.holder_id
+  })
+}
+
+fn is_durable(store, object_digest, min_holders) {
+  list.len(holders_for(store, object_digest)) >= min_holders
+}
+
+fn durability_report(store, object_digests, min_holders) {
+  list.map(object_digests, fn(digest) {
+    let holder_count = list.len(holders_for(store, digest)) in
+    {
+      object_digest: digest,
+      holder_count: holder_count,
+      durable: holder_count >= min_holders
+    }
+  })
+}
+
+fn receipt_count(store) {
+  list.len(store.receipt_index)
+}
+
+fn declaration_count(store) {
+  list.len(rec.keys(store.declarations))
+}
+
+export { make_declaration, declaration_digest, sign_declaration, verify_declaration, make_receipt, receipt_digest, sign_receipt, verify_receipt, empty_replication_store, store_declaration, store_receipt, holders_for, is_durable, durability_report, receipt_count, declaration_count }
