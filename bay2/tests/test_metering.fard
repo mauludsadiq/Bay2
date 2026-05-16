@@ -1,0 +1,79 @@
+import("../src/metering") as m
+import("std/list") as list
+
+test "empty meter has zero balance" {
+  let meter = m.empty_meter() in
+  m.get_balance(meter, "agent:1") == 0
+}
+
+test "credit increases balance" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  m.get_balance(meter, "agent:1") == 1000
+}
+
+test "can afford returns true when sufficient" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  m.can_afford(meter, "agent:1", 100)
+}
+
+test "can afford returns false when insufficient" {
+  m.can_afford(m.empty_meter(), "agent:1", 100) == false
+}
+
+test "object store has base cost" {
+  m.compute_cost("object_store", {}) == m.BASE_OBJECT_STORE
+}
+
+test "object store cost scales with payload size" {
+  let small = m.compute_cost("object_store", { payload_size: 10 }) in
+  let large = m.compute_cost("object_store", { payload_size: 100 }) in
+  large > small
+}
+
+test "stream append has base cost" {
+  m.compute_cost("stream_append", {}) == m.BASE_STREAM_APPEND
+}
+
+test "charge deducts from balance" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  let result = m.charge(meter, "agent:1", "object_store", {}) in
+  result.ok && m.get_balance(result.meter, "agent:1") == 1000 - m.BASE_OBJECT_STORE
+}
+
+test "charge fails with insufficient balance" {
+  let result = m.charge(m.empty_meter(), "agent:1", "object_store", {}) in
+  !result.ok
+}
+
+test "charge logs operation" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  let r1 = m.charge(meter, "agent:1", "object_store", {}) in
+  let r2 = m.charge(r1.meter, "agent:1", "stream_append", {}) in
+  list.len(r2.meter.charge_log) == 2
+}
+
+test "total charged accumulates costs" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 10000) in
+  let r1 = m.charge(meter, "agent:1", "object_store", {}) in
+  let r2 = m.charge(r1.meter, "agent:1", "stream_append", {}) in
+  m.total_charged(r2.meter, "agent:1") == m.BASE_OBJECT_STORE + m.BASE_STREAM_APPEND
+}
+
+test "different agents have independent balances" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  m.get_balance(meter, "agent:2") == 0 && m.get_balance(meter, "agent:1") == 1000
+}
+
+test "replication cost scales with holders" {
+  let one = m.compute_cost("replication", { holder_count: 1 }) in
+  let three = m.compute_cost("replication", { holder_count: 3 }) in
+  three > one
+}
+
+test "meter summary counts agents and charges" {
+  let meter = m.credit(m.empty_meter(), "agent:1", 1000) in
+  let meter2 = m.credit(meter, "agent:2", 1000) in
+  let r = m.charge(meter2, "agent:1", "object_store", {}) in
+  let summary = m.meter_summary(r.meter) in
+  summary.agent_count == 2 && summary.total_charges == 1
+}

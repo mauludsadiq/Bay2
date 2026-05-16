@@ -1,0 +1,120 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 Economic Metering — compute and storage costs per operation.
+// Every operation has a declared cost in units (smallest denomination).
+// Meters track consumption per agent per resource.
+// Budgets set limits. Overages are rejected before execution.
+// All metering is deterministic and replayable.
+//
+// Cost model:
+//   object_store:    base + size_factor * payload_size
+//   stream_append:   base + size_factor * payload_size
+//   view_query:      base + row_factor * row_count
+//   policy_eval:     base + rule_factor * rule_count
+//   sub_deliver:     base per delivery
+//   replication:     base + holder_factor * holder_count
+
+let BASE_OBJECT_STORE  = 100
+let BASE_STREAM_APPEND = 50
+let BASE_VIEW_QUERY    = 20
+let BASE_POLICY_EVAL   = 10
+let BASE_SUB_DELIVER   = 5
+let BASE_REPLICATION   = 200
+let SIZE_FACTOR        = 1
+let ROW_FACTOR         = 2
+let RULE_FACTOR        = 3
+let HOLDER_FACTOR      = 50
+
+fn compute_cost(operation, params) {
+  if operation == "object_store" then
+    let size = rec.getOr(params, "payload_size", 0) in
+    BASE_OBJECT_STORE + SIZE_FACTOR * size
+  else if operation == "stream_append" then
+    let size = rec.getOr(params, "payload_size", 0) in
+    BASE_STREAM_APPEND + SIZE_FACTOR * size
+  else if operation == "view_query" then
+    let rows = rec.getOr(params, "row_count", 0) in
+    BASE_VIEW_QUERY + ROW_FACTOR * rows
+  else if operation == "policy_eval" then
+    let rules = rec.getOr(params, "rule_count", 0) in
+    BASE_POLICY_EVAL + RULE_FACTOR * rules
+  else if operation == "sub_deliver" then
+    BASE_SUB_DELIVER
+  else if operation == "replication" then
+    let holders = rec.getOr(params, "holder_count", 1) in
+    BASE_REPLICATION + HOLDER_FACTOR * holders
+  else 0
+}
+
+fn empty_meter() {
+  { balances: {}, usage: {}, charge_log: [] }
+}
+
+fn get_balance(meter, agent_id) {
+  rec.getOr(meter.balances, agent_id, 0)
+}
+
+fn credit(meter, agent_id, amount) {
+  let current = get_balance(meter, agent_id) in
+  { ...meter, balances: rec.set(meter.balances, agent_id, current + amount) }
+}
+
+fn get_usage(meter, agent_id, operation) {
+  let key = str.concat([agent_id, ":", operation]) in
+  rec.getOr(meter.usage, key, 0)
+}
+
+fn can_afford(meter, agent_id, cost) {
+  get_balance(meter, agent_id) >= cost
+}
+
+fn charge(meter, agent_id, operation, params) {
+  let cost = compute_cost(operation, params) in
+  if !can_afford(meter, agent_id, cost) then
+    { ok: false, reason: "insufficient balance", cost: cost, meter: meter }
+  else
+    let next_balance = get_balance(meter, agent_id) - cost in
+    let usage_key = str.concat([agent_id, ":", operation]) in
+    let current_usage = rec.getOr(meter.usage, usage_key, 0) in
+    let next_usage = rec.set(meter.usage, usage_key, current_usage + cost) in
+    let charge_event = { agent_id: agent_id, operation: operation, cost: cost, params: params } in
+    let next_log = list.append(meter.charge_log, charge_event) in
+    { ok: true, cost: cost, meter: {
+        balances: rec.set(meter.balances, agent_id, next_balance),
+        usage: next_usage,
+        charge_log: next_log
+      }
+    }
+}
+
+fn total_charged(meter, agent_id) {
+  list.fold(meter.charge_log, 0, fn(acc, e) {
+    if e.agent_id == agent_id then acc + e.cost else acc
+  })
+}
+
+fn usage_report(meter, agent_id) {
+  let ops = ["object_store", "stream_append", "view_query", "policy_eval", "sub_deliver", "replication"] in
+  list.map(ops, fn(op) {
+    { operation: op, total_cost: get_usage(meter, agent_id, op) }
+  })
+}
+
+fn meter_summary(meter) {
+  let agents = rec.keys(meter.balances) in
+  {
+    agent_count: list.len(agents),
+    total_charges: list.len(meter.charge_log),
+    total_spent: list.fold(meter.charge_log, 0, fn(acc, e) { acc + e.cost })
+  }
+}
+
+fn set_budget(meter, agent_id, amount) {
+  credit(meter, agent_id, amount)
+}
+
+export { compute_cost, empty_meter, get_balance, credit, get_usage, can_afford, charge, total_charged, usage_report, meter_summary, set_budget, BASE_OBJECT_STORE, BASE_STREAM_APPEND, BASE_VIEW_QUERY, BASE_POLICY_EVAL, BASE_SUB_DELIVER, BASE_REPLICATION }
