@@ -1,0 +1,125 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 Deterministic Replay — given an initial state and a stream of
+// operations, reproduce any past state exactly.
+// This is the audit and debugging primitive.
+// Every state transition is logged as a signed operation.
+// Replaying from genesis produces the same state every time.
+//
+// Operation kinds:
+//   object_store:   store an object
+//   view_upsert:    upsert a row in a view
+//   view_delete:    delete a row from a view
+//   sub_add:        add a subscription
+//   sub_remove:     remove a subscription
+//   policy_attach:  attach a policy to a namespace
+//   receipt_store:  store a replication receipt
+
+fn make_operation(kind, payload, author_id, parent_op_digest, timestamp_unix_secs) {
+  {
+    kind: kind,
+    payload: payload,
+    author_id: author_id,
+    parent_op_digest: parent_op_digest,
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn operation_digest(op) {
+  hash.sha256_text(json.canonicalize({
+    kind: op.kind,
+    payload: op.payload,
+    author_id: op.author_id,
+    parent_op_digest: op.parent_op_digest,
+    timestamp_unix_secs: op.timestamp_unix_secs
+  }))
+}
+
+let GENESIS_OP_DIGEST = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+fn genesis_operation(kind, payload, author_id, timestamp_unix_secs) {
+  make_operation(kind, payload, author_id, GENESIS_OP_DIGEST, timestamp_unix_secs)
+}
+
+fn is_genesis_op(op) {
+  op.parent_op_digest == GENESIS_OP_DIGEST
+}
+
+fn empty_op_log() {
+  { operations: {}, head: GENESIS_OP_DIGEST, op_index: [], entry_count: 0 }
+}
+
+fn append_operation(log, op) {
+  let digest = operation_digest(op) in
+  if rec.has(log.operations, digest) then
+    { log: log, digest: digest, appended: false }
+  else
+    let next_ops = rec.set(log.operations, digest, op) in
+    let next_index = list.append(log.op_index, digest) in
+    { log: { operations: next_ops, head: digest, op_index: next_index, entry_count: log.entry_count + 1 },
+      digest: digest, appended: true }
+}
+
+fn get_operation(log, digest) {
+  rec.getOr(log.operations, digest, null)
+}
+
+fn replay_log(log) {
+  list.map(log.op_index, fn(digest) {
+    rec.get(log.operations, digest)
+  })
+}
+
+fn verify_log_chain(log) {
+  let ops = replay_log(log) in
+  if list.len(ops) == 0 then { valid: true, op_count: 0 }
+  else
+    let pairs = list.zip(ops, list.tail(ops)) in
+    let all_linked = list.all(pairs, fn(p) {
+      let parent = list.head(p) in
+      let child = list.get(p, 1) in
+      child.parent_op_digest == operation_digest(parent)
+    }) in
+    { valid: all_linked, op_count: list.len(ops) }
+}
+
+fn replay_to_checkpoint(log, checkpoint_digest) {
+  let max_steps = list.len(log.op_index) in
+  let steps = list.range(0, max_steps) in
+  let result = list.fold(steps, { found: false, ops: [] }, fn(acc, i) {
+    if acc.found then acc
+    else
+      let digest = list.get(log.op_index, i) in
+      let op = rec.get(log.operations, digest) in
+      if digest == checkpoint_digest then
+        { found: true, ops: list.append(acc.ops, op) }
+      else
+        { found: false, ops: list.append(acc.ops, op) }
+  }) in
+  result.ops
+}
+
+fn op_count(log) {
+  log.entry_count
+}
+
+fn log_head(log) {
+  log.head
+}
+
+fn apply_operations(initial_state, ops, apply_fn) {
+  list.fold(ops, initial_state, fn(state, op) {
+    apply_fn(state, op)
+  })
+}
+
+fn snapshot_at(log, checkpoint_digest, initial_state, apply_fn) {
+  let ops = replay_to_checkpoint(log, checkpoint_digest) in
+  apply_operations(initial_state, ops, apply_fn)
+}
+
+export { make_operation, operation_digest, genesis_operation, is_genesis_op, GENESIS_OP_DIGEST, empty_op_log, append_operation, get_operation, replay_log, verify_log_chain, replay_to_checkpoint, op_count, log_head, apply_operations, snapshot_at }

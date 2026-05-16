@@ -1,0 +1,97 @@
+import("../src/replay") as replay
+import("std/list") as list
+import("std/str") as str
+
+test "operation digest is stable" {
+  let op = replay.genesis_operation("object_store", { digest: "sha256:abc" }, "agent:1", 1000) in
+  replay.operation_digest(op) == replay.operation_digest(op)
+}
+
+test "different payloads produce different digests" {
+  let op1 = replay.genesis_operation("object_store", { digest: "sha256:abc" }, "agent:1", 1000) in
+  let op2 = replay.genesis_operation("object_store", { digest: "sha256:def" }, "agent:1", 1000) in
+  replay.operation_digest(op1) != replay.operation_digest(op2)
+}
+
+test "genesis operation has zero parent" {
+  let op = replay.genesis_operation("object_store", {}, "agent:1", 1000) in
+  replay.is_genesis_op(op)
+}
+
+test "op log starts empty" {
+  let log = replay.empty_op_log() in
+  replay.op_count(log) == 0
+}
+
+test "append operation increments count" {
+  let log = replay.empty_op_log() in
+  let op = replay.genesis_operation("object_store", { digest: "sha256:abc" }, "agent:1", 1000) in
+  let result = replay.append_operation(log, op) in
+  result.appended && replay.op_count(result.log) == 1
+}
+
+test "duplicate append is rejected" {
+  let log = replay.empty_op_log() in
+  let op = replay.genesis_operation("object_store", { digest: "sha256:abc" }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op) in
+  let r2 = replay.append_operation(r1.log, op) in
+  !r2.appended && replay.op_count(r2.log) == 1
+}
+
+test "replay log returns operations in order" {
+  let log = replay.empty_op_log() in
+  let op1 = replay.genesis_operation("object_store", { n: 1 }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op1) in
+  let op2 = replay.make_operation("object_store", { n: 2 }, "agent:1", r1.digest, 1001) in
+  let r2 = replay.append_operation(r1.log, op2) in
+  let ops = replay.replay_log(r2.log) in
+  list.len(ops) == 2 &&
+  list.get(ops, 0).payload.n == 1 &&
+  list.get(ops, 1).payload.n == 2
+}
+
+test "verify log chain accepts valid chain" {
+  let log = replay.empty_op_log() in
+  let op1 = replay.genesis_operation("object_store", { n: 1 }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op1) in
+  let op2 = replay.make_operation("object_store", { n: 2 }, "agent:1", r1.digest, 1001) in
+  let r2 = replay.append_operation(r1.log, op2) in
+  let report = replay.verify_log_chain(r2.log) in
+  report.valid && report.op_count == 2
+}
+
+test "apply operations produces deterministic state" {
+  let log = replay.empty_op_log() in
+  let op1 = replay.genesis_operation("inc", { by: 1 }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op1) in
+  let op2 = replay.make_operation("inc", { by: 2 }, "agent:1", r1.digest, 1001) in
+  let r2 = replay.append_operation(r1.log, op2) in
+  let ops = replay.replay_log(r2.log) in
+  let apply_fn = fn(state, op) { { total: state.total + op.payload.by } } in
+  let final_state = replay.apply_operations({ total: 0 }, ops, apply_fn) in
+  final_state.total == 3
+}
+
+test "replay to checkpoint stops at target" {
+  let log = replay.empty_op_log() in
+  let op1 = replay.genesis_operation("inc", { by: 1 }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op1) in
+  let op2 = replay.make_operation("inc", { by: 2 }, "agent:1", r1.digest, 1001) in
+  let r2 = replay.append_operation(r1.log, op2) in
+  let op3 = replay.make_operation("inc", { by: 3 }, "agent:1", r2.digest, 1002) in
+  let r3 = replay.append_operation(r2.log, op3) in
+  let ops = replay.replay_to_checkpoint(r3.log, r2.digest) in
+  let apply_fn = fn(state, op) { { total: state.total + op.payload.by } } in
+  let state = replay.apply_operations({ total: 0 }, ops, apply_fn) in
+  state.total == 3
+}
+
+test "log head advances with each append" {
+  let log = replay.empty_op_log() in
+  let op1 = replay.genesis_operation("inc", { by: 1 }, "agent:1", 1000) in
+  let r1 = replay.append_operation(log, op1) in
+  let op2 = replay.make_operation("inc", { by: 2 }, "agent:1", r1.digest, 1001) in
+  let r2 = replay.append_operation(r1.log, op2) in
+  replay.log_head(r1.log) != replay.log_head(r2.log) &&
+  replay.log_head(r2.log) == r2.digest
+}
