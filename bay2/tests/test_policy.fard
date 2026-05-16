@@ -1,0 +1,78 @@
+import("../src/policy") as pol
+import("std/list") as list
+
+test "policy digest is stable" {
+  let p = pol.make_policy("p1", "issuer:1", [], "deny", 1000) in
+  pol.policy_digest(p) == pol.policy_digest(p)
+}
+
+test "allow rule permits operation" {
+  let rule = pol.make_rule("allow", "agent:1", "stream:*", "append", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [rule], "deny", 1000) in
+  let result = pol.evaluate_policy(p, "agent:1", "stream:s1", "append") in
+  result.allowed && result.effect == "allow"
+}
+
+test "deny rule blocks operation" {
+  let rule = pol.make_rule("deny", "agent:1", "stream:*", "append", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [rule], "allow", 1000) in
+  let result = pol.evaluate_policy(p, "agent:1", "stream:s1", "append") in
+  !result.allowed && result.effect == "deny"
+}
+
+test "deny overrides allow" {
+  let allow_rule = pol.make_rule("allow", "*", "stream:*", "append", {}) in
+  let deny_rule = pol.make_rule("deny", "agent:1", "stream:s1", "append", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [allow_rule, deny_rule], "deny", 1000) in
+  let result = pol.evaluate_policy(p, "agent:1", "stream:s1", "append") in
+  !result.allowed
+}
+
+test "default effect applies when no rules match" {
+  let p = pol.make_policy("p1", "issuer:1", [], "allow", 1000) in
+  let result = pol.evaluate_policy(p, "agent:1", "stream:s1", "append") in
+  result.allowed && result.effect == "allow"
+}
+
+test "default deny blocks when no rules match" {
+  let p = pol.make_policy("p1", "issuer:1", [], "deny", 1000) in
+  let result = pol.evaluate_policy(p, "agent:1", "stream:s1", "append") in
+  !result.allowed
+}
+
+test "wildcard subject matches all agents" {
+  let rule = pol.make_rule("allow", "*", "stream:*", "read", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [rule], "deny", 1000) in
+  let r1 = pol.evaluate_policy(p, "agent:1", "stream:s1", "read") in
+  let r2 = pol.evaluate_policy(p, "agent:99", "stream:s1", "read") in
+  r1.allowed && r2.allowed
+}
+
+test "specific subject does not match other agents" {
+  let rule = pol.make_rule("allow", "agent:1", "stream:*", "read", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [rule], "deny", 1000) in
+  let r1 = pol.evaluate_policy(p, "agent:1", "stream:s1", "read") in
+  let r2 = pol.evaluate_policy(p, "agent:2", "stream:s1", "read") in
+  r1.allowed && !r2.allowed
+}
+
+test "namespace evaluation with no policy denies" {
+  let store = pol.empty_policy_store() in
+  let result = pol.evaluate_namespace(store, "ns:1", "agent:1", "stream:s1", "read") in
+  !result.allowed && result.effect == "no_policy"
+}
+
+test "namespace evaluation with allow policy permits" {
+  let rule = pol.make_rule("allow", "*", "*", "read", {}) in
+  let p = pol.make_policy("p1", "issuer:1", [rule], "deny", 1000) in
+  let r = pol.register_policy(pol.empty_policy_store(), p) in
+  let store = pol.attach_policy_to_namespace(r, "ns:1", r.digest) in
+  let result = pol.evaluate_namespace(store, "ns:1", "agent:1", "stream:s1", "read") in
+  result.allowed
+}
+
+test "policy store tracks count" {
+  let p = pol.make_policy("p1", "issuer:1", [], "deny", 1000) in
+  let r = pol.register_policy(pol.empty_policy_store(), p) in
+  pol.policy_count(r) == 1
+}

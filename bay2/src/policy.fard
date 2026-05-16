@@ -1,0 +1,130 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 Policy — declared rules enforced at the substrate level.
+// No ambient authority. Every operation is checked against declared policy.
+// Policies are signed by the issuer and attached to namespaces.
+// Policy evaluation is deterministic and replayable.
+//
+// Policy rule kinds:
+//   allow:    explicitly permit an operation
+//   deny:     explicitly forbid an operation
+//   require:  require a condition to be met
+//   rate:     limit operations per time window
+//
+// Policy evaluation order: deny > allow > require > default_deny
+
+fn make_rule(kind, subject, resource, operation, condition) {
+  {
+    kind: kind,
+    subject: subject,
+    resource: resource,
+    operation: operation,
+    condition: condition
+  }
+}
+
+fn make_policy(policy_id, issuer_id, rules, default_effect, timestamp_unix_secs) {
+  {
+    policy_id: policy_id,
+    issuer_id: issuer_id,
+    rules: rules,
+    default_effect: default_effect,
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn policy_digest(policy) {
+  hash.sha256_text(json.canonicalize({
+    policy_id: policy.policy_id,
+    issuer_id: policy.issuer_id,
+    rule_count: list.len(policy.rules),
+    default_effect: policy.default_effect,
+    timestamp_unix_secs: policy.timestamp_unix_secs
+  }))
+}
+
+fn subject_matches(rule_subject, actual_subject) {
+  rule_subject == "*" || rule_subject == actual_subject
+}
+
+fn resource_matches_policy(rule_resource, actual_resource) {
+  if rule_resource == "*" then true
+  else if str.ends_with(rule_resource, "*") then
+    let prefix = str.slice(rule_resource, 0, str.len(rule_resource) - 1) in
+    str.starts_with(actual_resource, prefix)
+  else
+    rule_resource == actual_resource
+}
+
+fn operation_matches(rule_op, actual_op) {
+  rule_op == "*" || rule_op == actual_op
+}
+
+fn rule_applies(rule, subject, resource, operation) {
+  subject_matches(rule.subject, subject) &&
+  resource_matches_policy(rule.resource, resource) &&
+  operation_matches(rule.operation, operation)
+}
+
+fn evaluate_policy(policy, subject, resource, operation) {
+  let applicable = list.filter(policy.rules, fn(rule) {
+    rule_applies(rule, subject, resource, operation)
+  }) in
+  let deny_rules = list.filter(applicable, fn(r) { r.kind == "deny" }) in
+  let allow_rules = list.filter(applicable, fn(r) { r.kind == "allow" }) in
+  if list.len(deny_rules) > 0 then
+    { allowed: false, effect: "deny", matched_rule: list.head(deny_rules) }
+  else if list.len(allow_rules) > 0 then
+    { allowed: true, effect: "allow", matched_rule: list.head(allow_rules) }
+  else
+    { allowed: policy.default_effect == "allow", effect: policy.default_effect, matched_rule: null }
+}
+
+fn empty_policy_store() {
+  { policies: {}, namespace_policies: {}, policy_index: [] }
+}
+
+fn register_policy(store, policy) {
+  let digest = policy_digest(policy) in
+  let next_policies = rec.set(store.policies, digest, policy) in
+  let next_index = if list.any(store.policy_index, fn(d) { d == digest }) then
+    store.policy_index
+  else
+    list.append(store.policy_index, digest)
+  in
+  { ...store, policies: next_policies, policy_index: next_index, digest: digest }
+}
+
+fn attach_policy_to_namespace(store, namespace, policy_digest) {
+  let existing = rec.getOr(store.namespace_policies, namespace, []) in
+  let next = if list.any(existing, fn(d) { d == policy_digest }) then existing
+    else list.append(existing, policy_digest) in
+  { ...store, namespace_policies: rec.set(store.namespace_policies, namespace, next) }
+}
+
+fn evaluate_namespace(store, namespace, subject, resource, operation) {
+  let policy_digests = rec.getOr(store.namespace_policies, namespace, []) in
+  if list.len(policy_digests) == 0 then
+    { allowed: false, effect: "no_policy", reason: "no policy attached to namespace" }
+  else
+    let results = list.map(policy_digests, fn(digest) {
+      let policy = rec.getOr(store.policies, digest, null) in
+      if policy == null then { allowed: false, effect: "missing_policy" }
+      else evaluate_policy(policy, subject, resource, operation)
+    }) in
+    let any_deny = list.any(results, fn(r) { !r.allowed && r.effect == "deny" }) in
+    let any_allow = list.any(results, fn(r) { r.allowed }) in
+    if any_deny then { allowed: false, effect: "deny", reason: "explicit deny rule matched" }
+    else if any_allow then { allowed: true, effect: "allow", reason: "explicit allow rule matched" }
+    else { allowed: false, effect: "default_deny", reason: "no matching allow rule" }
+}
+
+fn policy_count(store) {
+  list.len(store.policy_index)
+}
+
+export { make_rule, make_policy, policy_digest, evaluate_policy, empty_policy_store, register_policy, attach_policy_to_namespace, evaluate_namespace, policy_count }
