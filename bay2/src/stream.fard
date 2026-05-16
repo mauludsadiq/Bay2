@@ -1,0 +1,118 @@
+import("std/json") as json
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/hash") as hash
+
+fn make_entry(stream_id, kind, payload, author_id, parent_digest, timestamp_unix_secs) {
+  {
+    stream_id: stream_id,
+    kind: kind,
+    payload: payload,
+    author_id: author_id,
+    parent_digest: parent_digest,
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn entry_digest(entry) {
+  hash.sha256_text(json.canonicalize({
+    stream_id: entry.stream_id,
+    kind: entry.kind,
+    payload: entry.payload,
+    author_id: entry.author_id,
+    parent_digest: entry.parent_digest,
+    timestamp_unix_secs: entry.timestamp_unix_secs
+  }))
+}
+
+let ZERO_DIGEST = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+fn genesis_entry(stream_id, kind, payload, author_id, timestamp_unix_secs) {
+  make_entry(stream_id, kind, payload, author_id, ZERO_DIGEST, timestamp_unix_secs)
+}
+
+fn is_genesis(entry) {
+  entry.parent_digest == ZERO_DIGEST
+}
+
+fn empty_stream_store() {
+  { entries: {}, heads: {}, stream_index: [] }
+}
+
+fn append_entry(store, entry) {
+  let digest = entry_digest(entry) in
+  let sid = entry.stream_id in
+  if rec.has(store.entries, digest) then
+    { store: store, digest: digest, appended: false, reason: "already exists" }
+  else
+    let next_entries = rec.set(store.entries, digest, entry) in
+    let next_heads = rec.set(store.heads, sid, digest) in
+    let next_index = if list.any(store.stream_index, fn(s) { s == sid }) then
+      store.stream_index
+    else
+      list.append(store.stream_index, sid)
+    in
+    { store: { entries: next_entries, heads: next_heads, stream_index: next_index },
+      digest: digest, appended: true, reason: "appended" }
+}
+
+fn get_entry(store, digest) {
+  rec.getOr(store.entries, digest, null)
+}
+
+fn get_head(store, stream_id) {
+  rec.getOr(store.heads, stream_id, null)
+}
+
+fn has_stream(store, stream_id) {
+  list.any(store.stream_index, fn(s) { s == stream_id })
+}
+
+fn stream_count(store) {
+  list.len(store.stream_index)
+}
+
+fn entry_count(store) {
+  list.len(rec.keys(store.entries))
+}
+
+fn replay_stream(store, stream_id) {
+  let head = get_head(store, stream_id) in
+  if head == null then []
+  else
+    let max_depth = list.len(rec.keys(store.entries)) in
+    let steps = list.range(0, max_depth) in
+    let result = list.fold(steps, { done: false, digest: head, acc: [] }, fn(state, _) {
+      if state.done then state
+      else
+        let entry = get_entry(store, state.digest) in
+        if entry == null then { ...state, done: true }
+        else if is_genesis(entry) then
+          { done: true, digest: state.digest, acc: list.append(state.acc, entry) }
+        else
+          { done: false, digest: entry.parent_digest, acc: list.append(state.acc, entry) }
+    }) in
+    list.reverse(result.acc)
+}
+
+fn verify_chain(store, stream_id) {
+  let entries = replay_stream(store, stream_id) in
+  if list.len(entries) == 0 then { valid: false, reason: "empty stream" }
+  else
+    let pairs = list.zip(entries, list.tail(entries)) in
+    let all_linked = list.all(pairs, fn(p) {
+      entry_digest(list.head(p)) == list.get(p, 1).parent_digest
+    }) in
+    { valid: all_linked, entry_count: list.len(entries), stream_id: stream_id }
+}
+
+fn causal_before(store, digest_a, digest_b) {
+  let entry_b = get_entry(store, digest_b) in
+  if entry_b == null then false
+  else if is_genesis(entry_b) then false
+  else if entry_b.parent_digest == digest_a then true
+  else causal_before(store, digest_a, entry_b.parent_digest)
+}
+
+export { make_entry, entry_digest, genesis_entry, is_genesis, ZERO_DIGEST, empty_stream_store, append_entry, get_entry, get_head, has_stream, stream_count, entry_count, replay_stream, verify_chain, causal_before }

@@ -1,0 +1,91 @@
+import("../src/stream") as stream
+import("std/list") as list
+import("std/str") as str
+
+test "entry digest is stable" {
+  let e = stream.genesis_entry("s1", "msg", { text: "hello" }, "agent:1", 1000) in
+  stream.entry_digest(e) == stream.entry_digest(e)
+}
+
+test "different payloads produce different digests" {
+  let e1 = stream.genesis_entry("s1", "msg", { text: "hello" }, "agent:1", 1000) in
+  let e2 = stream.genesis_entry("s1", "msg", { text: "world" }, "agent:1", 1000) in
+  stream.entry_digest(e1) != stream.entry_digest(e2)
+}
+
+test "genesis entry is_genesis returns true" {
+  let e = stream.genesis_entry("s1", "msg", { text: "hello" }, "agent:1", 1000) in
+  stream.is_genesis(e)
+}
+
+test "stream store starts empty" {
+  let s = stream.empty_stream_store() in
+  stream.stream_count(s) == 0 && stream.entry_count(s) == 0
+}
+
+test "append genesis creates stream" {
+  let s = stream.empty_stream_store() in
+  let e = stream.genesis_entry("s1", "msg", { text: "hello" }, "agent:1", 1000) in
+  let result = stream.append_entry(s, e) in
+  result.appended && stream.stream_count(result.store) == 1
+}
+
+test "head points to latest entry" {
+  let s = stream.empty_stream_store() in
+  let e1 = stream.genesis_entry("s1", "msg", { text: "first" }, "agent:1", 1000) in
+  let r1 = stream.append_entry(s, e1) in
+  let e2 = stream.make_entry("s1", "msg", { text: "second" }, "agent:1", r1.digest, 1001) in
+  let r2 = stream.append_entry(r1.store, e2) in
+  stream.get_head(r2.store, "s1") == r2.digest
+}
+
+test "duplicate append is rejected" {
+  let s = stream.empty_stream_store() in
+  let e = stream.genesis_entry("s1", "msg", { text: "hello" }, "agent:1", 1000) in
+  let r1 = stream.append_entry(s, e) in
+  let r2 = stream.append_entry(r1.store, e) in
+  !r2.appended && stream.entry_count(r2.store) == 1
+}
+
+test "replay stream returns entries in causal order" {
+  let s = stream.empty_stream_store() in
+  let e1 = stream.genesis_entry("s1", "msg", { text: "first" }, "agent:1", 1000) in
+  let r1 = stream.append_entry(s, e1) in
+  let e2 = stream.make_entry("s1", "msg", { text: "second" }, "agent:1", r1.digest, 1001) in
+  let r2 = stream.append_entry(r1.store, e2) in
+  let e3 = stream.make_entry("s1", "msg", { text: "third" }, "agent:1", r2.digest, 1002) in
+  let r3 = stream.append_entry(r2.store, e3) in
+  let entries = stream.replay_stream(r3.store, "s1") in
+  list.len(entries) == 3 &&
+  list.get(entries, 0).payload.text == "first" &&
+  list.get(entries, 2).payload.text == "third"
+}
+
+test "verify chain accepts valid chain" {
+  let s = stream.empty_stream_store() in
+  let e1 = stream.genesis_entry("s1", "msg", { text: "first" }, "agent:1", 1000) in
+  let r1 = stream.append_entry(s, e1) in
+  let e2 = stream.make_entry("s1", "msg", { text: "second" }, "agent:1", r1.digest, 1001) in
+  let r2 = stream.append_entry(r1.store, e2) in
+  let report = stream.verify_chain(r2.store, "s1") in
+  report.valid && report.entry_count == 2
+}
+
+test "causal before detects ordering" {
+  let s = stream.empty_stream_store() in
+  let e1 = stream.genesis_entry("s1", "msg", { text: "first" }, "agent:1", 1000) in
+  let r1 = stream.append_entry(s, e1) in
+  let e2 = stream.make_entry("s1", "msg", { text: "second" }, "agent:1", r1.digest, 1001) in
+  let r2 = stream.append_entry(r1.store, e2) in
+  stream.causal_before(r2.store, r1.digest, r2.digest) &&
+  !stream.causal_before(r2.store, r2.digest, r1.digest)
+}
+
+test "two streams are independent" {
+  let s = stream.empty_stream_store() in
+  let e1 = stream.genesis_entry("s1", "msg", { text: "stream1" }, "agent:1", 1000) in
+  let e2 = stream.genesis_entry("s2", "msg", { text: "stream2" }, "agent:2", 1000) in
+  let r1 = stream.append_entry(s, e1) in
+  let r2 = stream.append_entry(r1.store, e2) in
+  stream.stream_count(r2.store) == 2
+}
