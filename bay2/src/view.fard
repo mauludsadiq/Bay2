@@ -1,0 +1,151 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("std/json") as json
+import("std/hash") as hash
+
+// Bay2 Materialized View — projections maintained over object streams.
+// A view is a named, versioned projection of a subset of objects.
+// Views are updated incrementally as new objects arrive.
+// Views are digest-addressed — the view digest reflects its current state.
+// Views can be queried, snapshotted, and replicated.
+//
+// View kinds:
+//   filter view:    objects matching a predicate
+//   aggregate view: running count/sum/collect over a stream
+//   join view:      objects from multiple streams merged by key
+
+fn empty_view(view_id, kind, spec) {
+  {
+    view_id: view_id,
+    kind: kind,
+    spec: spec,
+    rows: {},
+    row_index: [],
+    version: 0,
+    last_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+
+fn view_digest(view) {
+  hash.sha256_text(json.canonicalize({
+    view_id: view.view_id,
+    version: view.version,
+    row_count: list.len(view.row_index)
+  }))
+}
+
+fn upsert_row(view, key, value) {
+  let next_rows = rec.set(view.rows, key, value) in
+  let next_index = if list.any(view.row_index, fn(k) { k == key }) then
+    view.row_index
+  else
+    list.append(view.row_index, key)
+  in
+  let next_view = { ...view, rows: next_rows, row_index: next_index, version: view.version + 1 } in
+  { ...next_view, last_digest: view_digest(next_view) }
+}
+
+fn delete_row(view, key) {
+  let next_rows = rec.remove(view.rows, key) in
+  let next_index = list.filter(view.row_index, fn(k) { k != key }) in
+  let next_view = { ...view, rows: next_rows, row_index: next_index, version: view.version + 1 } in
+  { ...next_view, last_digest: view_digest(next_view) }
+}
+
+fn get_row(view, key) {
+  rec.getOr(view.rows, key, null)
+}
+
+fn has_row(view, key) {
+  rec.has(view.rows, key)
+}
+
+fn all_rows(view) {
+  list.map(view.row_index, fn(k) {
+    { key: k, value: rec.get(view.rows, k) }
+  })
+}
+
+fn row_count(view) {
+  list.len(view.row_index)
+}
+
+fn filter_rows(view, predicate) {
+  list.filter(view.row_index, fn(k) {
+    predicate(k, rec.get(view.rows, k))
+  })
+}
+
+fn apply_object_to_filter_view(view, digest, obj) {
+  let spec = view.spec in
+  let kind_match = !rec.has(spec, "kind") || spec.kind == obj.kind in
+  let author_match = !rec.has(spec, "author_id") || spec.author_id == obj.author_id in
+  if kind_match && author_match then
+    upsert_row(view, digest, obj)
+  else
+    view
+}
+
+fn apply_object_to_count_view(view, digest, obj) {
+  let spec = view.spec in
+  let kind_match = !rec.has(spec, "kind") || spec.kind == obj.kind in
+  if kind_match then
+    let current = get_row(view, "count") in
+    let count = if current == null then 0 else current.count in
+    upsert_row(view, "count", { count: count + 1 })
+  else
+    view
+}
+
+fn apply_object(view, digest, obj) {
+  if view.kind == "filter" then apply_object_to_filter_view(view, digest, obj)
+  else if view.kind == "count" then apply_object_to_count_view(view, digest, obj)
+  else view
+}
+
+fn snapshot(view, timestamp_unix_secs) {
+  {
+    view_id: view.view_id,
+    version: view.version,
+    digest: view.last_digest,
+    row_count: row_count(view),
+    timestamp_unix_secs: timestamp_unix_secs
+  }
+}
+
+fn empty_view_store() {
+  { views: {}, view_index: [] }
+}
+
+fn register_view(store, view) {
+  let next_views = rec.set(store.views, view.view_id, view) in
+  let next_index = if list.any(store.view_index, fn(v) { v == view.view_id }) then
+    store.view_index
+  else
+    list.append(store.view_index, view.view_id)
+  in
+  { views: next_views, view_index: next_index }
+}
+
+fn get_view(store, view_id) {
+  rec.getOr(store.views, view_id, null)
+}
+
+fn update_view(store, view) {
+  { ...store, views: rec.set(store.views, view.view_id, view) }
+}
+
+fn apply_to_all_views(store, digest, obj) {
+  list.fold(store.view_index, store, fn(acc, vid) {
+    let view = rec.get(acc.views, vid) in
+    let updated = apply_object(view, digest, obj) in
+    { ...acc, views: rec.set(acc.views, vid, updated) }
+  })
+}
+
+fn view_count(store) {
+  list.len(store.view_index)
+}
+
+export { empty_view, view_digest, upsert_row, delete_row, get_row, has_row, all_rows, row_count, filter_rows, apply_object_to_filter_view, apply_object_to_count_view, apply_object, snapshot, empty_view_store, register_view, get_view, update_view, apply_to_all_views, view_count }

@@ -1,0 +1,83 @@
+import("../src/view") as view
+import("std/list") as list
+
+test "empty view has no rows" {
+  let v = view.empty_view("v1", "filter", {}) in
+  view.row_count(v) == 0
+}
+
+test "upsert row adds entry" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  view.row_count(v2) == 1 && view.has_row(v2, "key1")
+}
+
+test "upsert row increments version" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  v2.version == 1
+}
+
+test "duplicate upsert updates value not count" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  let v3 = view.upsert_row(v2, "key1", { data: "world" }) in
+  view.row_count(v3) == 1 && view.get_row(v3, "key1").data == "world"
+}
+
+test "delete row removes entry" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  let v3 = view.delete_row(v2, "key1") in
+  view.row_count(v3) == 0 && !view.has_row(v3, "key1")
+}
+
+test "view digest changes on update" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let d1 = view.view_digest(v) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  let d2 = view.view_digest(v2) in
+  d1 != d2
+}
+
+test "filter view accepts matching objects" {
+  let v = view.empty_view("v1", "filter", { kind: "doc" }) in
+  let obj = { kind: "doc", payload: { text: "hello" }, author_id: "agent:1", timestamp_unix_secs: 1000 } in
+  let v2 = view.apply_object(v, "sha256:abc", obj) in
+  view.row_count(v2) == 1
+}
+
+test "filter view rejects non-matching objects" {
+  let v = view.empty_view("v1", "filter", { kind: "doc" }) in
+  let obj = { kind: "msg", payload: { text: "hello" }, author_id: "agent:1", timestamp_unix_secs: 1000 } in
+  let v2 = view.apply_object(v, "sha256:abc", obj) in
+  view.row_count(v2) == 0
+}
+
+test "count view tracks object count" {
+  let v = view.empty_view("v1", "count", { kind: "doc" }) in
+  let obj = { kind: "doc", payload: {}, author_id: "agent:1", timestamp_unix_secs: 1000 } in
+  let v2 = view.apply_object(v, "sha256:abc", obj) in
+  let v3 = view.apply_object(v2, "sha256:def", obj) in
+  view.get_row(v3, "count").count == 2
+}
+
+test "apply to all views updates all registered views" {
+  let store = view.empty_view_store() in
+  let v1 = view.empty_view("v1", "filter", { kind: "doc" }) in
+  let v2 = view.empty_view("v2", "count", { kind: "doc" }) in
+  let s1 = view.register_view(store, v1) in
+  let s2 = view.register_view(s1, v2) in
+  let obj = { kind: "doc", payload: {}, author_id: "agent:1", timestamp_unix_secs: 1000 } in
+  let s3 = view.apply_to_all_views(s2, "sha256:abc", obj) in
+  let filter_view = view.get_view(s3, "v1") in
+  let count_view = view.get_view(s3, "v2") in
+  view.row_count(filter_view) == 1 && view.get_row(count_view, "count").count == 1
+}
+
+test "snapshot captures view state" {
+  let v = view.empty_view("v1", "filter", {}) in
+  let v2 = view.upsert_row(v, "key1", { data: "hello" }) in
+  let snap = view.snapshot(v2, 1000) in
+  snap.version == 1 && snap.row_count == 1 && snap.view_id == "v1"
+}
