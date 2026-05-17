@@ -15,8 +15,8 @@ import("std/process") as process
 import("std/promise") as promise
 import("std/mutex") as mutex
 
-let port = 19000
-let db_path = "file:out/bay2/bay2.db?cache=shared&mode=rwc"
+let port = 19002
+let db_path = "file:out/bay2/bay2_c.db?cache=shared&mode=rwc"
 let db = sqlite.open(db_path)
 let _ = sqlite.exec(db, "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
 
